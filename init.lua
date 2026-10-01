@@ -219,6 +219,17 @@ do
   -- or just use <C-\><C-n> to exit terminal mode
   vim.keymap.set('t', '<Esc><Esc>', '<C-\\><C-n>', { desc = 'Exit terminal mode' })
 
+  -- Bare :terminal opens in a split below, like tmux's `"`, instead of replacing the current buffer
+  vim.api.nvim_create_user_command('Term', function(o)
+    if vim.bo.filetype == 'neo-tree' then pcall(vim.cmd.wincmd, 'p') end
+    vim.cmd.split { mods = { split = 'belowright' } }
+    vim.cmd('terminal ' .. o.args)
+  end, { nargs = '*', complete = 'shellcmd', desc = 'Terminal in a split below' })
+  for i = 2, #'terminal' do
+    local abbr = ('terminal'):sub(1, i)
+    vim.keymap.set('ca', abbr, function() return (vim.fn.getcmdtype() == ':' and vim.fn.getcmdline() == abbr) and 'Term' or abbr end, { expr = true })
+  end
+
   -- TIP: Disable arrow keys in normal mode
   -- vim.keymap.set('n', '<left>', '<cmd>echo "Use h to move!!"<CR>')
   -- vim.keymap.set('n', '<right>', '<cmd>echo "Use l to move!!"<CR>')
@@ -404,9 +415,11 @@ do
 
   -- Useful plugin to show you pending keybinds.
   vim.pack.add { gh 'folke/which-key.nvim' }
+  local which_key_help = false
   require('which-key').setup {
-    -- Delay between pressing a key and opening which-key (milliseconds)
-    delay = 0,
+    -- Off is a delay nobody waits out (luv timers cap at int32 ms); z= keeps its popup since it is the suggestion list itself.
+    -- :WhichKey passes its own delay, so it still opens on demand.
+    delay = function(ctx) return (which_key_help or ctx.plugin == 'spelling') and 0 or 0x7fffffff end,
     icons = { mappings = vim.g.have_nerd_font },
     -- Document existing key chains
     spec = {
@@ -416,6 +429,8 @@ do
       { 'gr', group = 'LSP Actions', mode = { 'n' } },
     },
   }
+  vim.api.nvim_create_user_command('EnableHelp', function() which_key_help = true end, { desc = 'Show which-key popups' })
+  vim.api.nvim_create_user_command('DisableHelp', function() which_key_help = false end, { desc = 'Hide which-key popups' })
 
   -- [[ Colorscheme ]]
   -- You can easily change to a different colorscheme.
@@ -423,22 +438,9 @@ do
   -- change the command under that to load whatever the name of that colorscheme is.
   --
   -- If you want to see what colorschemes are already installed, you can use `:Telescope colorscheme`.
-  vim.pack.add { gh 'folke/tokyonight.nvim' }
-  ---@diagnostic disable-next-line: missing-fields
-  require('tokyonight').setup {
-    styles = {
-      comments = { italic = false }, -- Disable italics in comments
-    },
-  }
-
-  -- Load the colorscheme here.
-  -- Like many other themes, this one has different styles, and you could load
-  -- any other, such as 'tokyonight-storm', 'tokyonight-moon', or 'tokyonight-day'.
-  vim.cmd.colorscheme 'tokyonight-night'
-
-  -- Highlight todo, notes, etc in comments
-  vim.pack.add { gh 'folke/todo-comments.nvim' }
-  require('todo-comments').setup { signs = false }
+  --
+  -- Local scheme in colors/vt.lua, built from the Linux console palette
+  vim.cmd.colorscheme 'vt'
 
   -- [[ mini.nvim ]]
   --  A collection of various small independent plugins/modules
@@ -733,16 +735,29 @@ do
   --  See `:help lsp-config` for information about keys and how to configure
   ---@type table<string, vim.lsp.Config>
   local servers = {
-    -- clangd = {},
-    -- gopls = {},
-    -- pyright = {},
-    -- tsc = {},
-    --
-    -- Some languages (like rust) have entire language plugins that can be useful:
-    --    https://github.com/mrcjkb/rustaceanvim
-    --
-    -- But for many setups, the LSP (`rust_analyzer`) will work just fine
-    -- rust_analyzer = {},
+    basedpyright = {
+      settings = {
+        basedpyright = {
+          disableOrganizeImports = true,
+          analysis = { typeCheckingMode = 'standard' },
+        },
+      },
+    },
+    -- Lint/format/imports only; hover comes from basedpyright
+    ruff = {
+      on_attach = function(client) client.server_capabilities.hoverProvider = false end,
+    },
+    bashls = {},
+    awk_ls = {},
+    gopls = {},
+    ts_ls = {},
+    html = {},
+    cssls = {},
+    jsonls = {},
+    yamlls = {},
+    taplo = {},
+    marksman = {},
+    neocmake = {},
 
     stylua = {}, -- Used to format Lua code
 
@@ -779,6 +794,19 @@ do
     },
   }
 
+  -- Not installed through mason: the distro builds track the installed clang and rustc
+  ---@type table<string, vim.lsp.Config>
+  local system_servers = {
+    clangd = {
+      cmd = { 'clangd', '--background-index', '--clang-tidy', '--header-insertion=never', '--pch-storage=memory' },
+    },
+    rust_analyzer = {
+      settings = {
+        ['rust-analyzer'] = { check = { command = 'clippy' } },
+      },
+    },
+  }
+
   vim.pack.add {
     gh 'neovim/nvim-lspconfig',
     gh 'mason-org/mason.nvim',
@@ -803,14 +831,17 @@ do
   -- You can press `g?` for help in this menu.
   local ensure_installed = vim.tbl_keys(servers or {})
   vim.list_extend(ensure_installed, {
-    -- You can add other tools here that you want Mason to install
+    'shellcheck', -- picked up by bashls for diagnostics
+    'shfmt',
   })
 
   require('mason-tool-installer').setup { ensure_installed = ensure_installed }
 
-  for name, server in pairs(servers) do
-    vim.lsp.config(name, server)
-    vim.lsp.enable(name)
+  for _, set in ipairs { servers, system_servers } do
+    for name, server in pairs(set) do
+      vim.lsp.config(name, server)
+      vim.lsp.enable(name)
+    end
   end
 end
 
@@ -840,6 +871,8 @@ do
     },
     -- You can also specify external formatters in here.
     formatters_by_ft = {
+      sh = { 'shfmt' },
+      bash = { 'shfmt' },
       -- rust = { 'rustfmt' },
       -- Conform can also run multiple formatters sequentially
       -- python = { "isort", "black" },
@@ -862,7 +895,49 @@ do
   -- NOTE: You can also specify plugin using a version range for its git tag.
   --  See `:help vim.version.range()` for more info
   vim.pack.add { { src = gh 'L3MON4D3/LuaSnip', version = vim.version.range '2.*' } }
-  require('luasnip').setup {}
+  local ls = require 'luasnip'
+  ls.setup { enable_autosnippets = true }
+
+  -- me:: expands to an authorship header; C-family filetypes get a /* */ block, the rest use their line comment
+  local me = 'Noah Burchell <noah@nburch.org>'
+  ls.add_snippets('all', {
+    ls.snippet({ trig = 'me::', snippetType = 'autosnippet' }, {
+      ls.dynamic_node(1, function()
+        local open, lead, close = '/*', ' *', ' */'
+        local pre, post = vim.bo.commentstring:match '^%s*(.-)%s*%%s%s*(.-)%s*$'
+        if pre and pre ~= '' and not pre:find '^/[/*]' then
+          if post == '' then
+            open, lead, close = nil, pre, nil
+          else
+            open, lead, close = pre, '', post
+          end
+        end
+
+        local pad = lead == '' and '' or lead .. ' '
+        local function comment(body)
+          local out = { '' }
+          for _, s in ipairs(body) do
+            out[#out + 1] = s == '' and lead or pad .. s
+          end
+          return out
+        end
+
+        local now = os.time()
+        local t = os.date('*t', now)
+        local mid = comment { '', '# Created', 'Author: ' .. me, ('Date: %s %d, %d'):format(os.date('%B', now), t.day, t.year), 'License: ' }
+        local tail = comment { '', '# Contributors', '- ' .. me }
+        tail[#tail + 1] = close
+
+        return ls.snippet_node(nil, {
+          ls.text_node(open and { open, pad } or pad),
+          ls.insert_node(1),
+          ls.text_node(mid),
+          ls.insert_node(2, 'GPL-3.0-only'),
+          ls.text_node(tail),
+        })
+      end),
+    }),
+  })
 
   -- `friendly-snippets` contains a variety of premade snippets.
   --    See the README about individual language/framework/plugin snippets:
@@ -948,14 +1023,43 @@ do
   vim.pack.add { { src = gh 'nvim-treesitter/nvim-treesitter', version = 'main' } }
 
   -- Ensure basic parsers are installed
-  local parsers = { 'bash', 'c', 'diff', 'html', 'lua', 'luadoc', 'markdown', 'markdown_inline', 'query', 'vim', 'vimdoc' }
+  -- printf and regex are injection-only, so the FileType auto-install below never fetches them
+  local parsers = {
+    'bash',
+    'c',
+    'cpp',
+    'rust',
+    'python',
+    'awk',
+    'make',
+    'kconfig',
+    'devicetree',
+    'printf',
+    'regex',
+    'diff',
+    'html',
+    'lua',
+    'luadoc',
+    'markdown',
+    'markdown_inline',
+    'query',
+    'vim',
+    'vimdoc',
+  }
   require('nvim-treesitter').install(parsers)
+
+  -- Gentoo's Vim runtime: ebuild/eclass, /etc/portage files, make.conf, init.d/conf.d, metadata.xml
+  vim.pack.add { gh 'gentoo/gentoo-syntax' }
 
   ---@param buf integer
   ---@param language string
   local function treesitter_try_attach(buf, language)
     -- Check if a parser exists and load it
-    if not vim.treesitter.language.add(language) then return end
+    -- Otherwise drop any highlighter left from an earlier filetype, e.g. bash from the builtin *.ebuild detection
+    if not vim.treesitter.language.add(language) then
+      vim.treesitter.stop(buf)
+      return
+    end
 
     -- Check if the buffer is valid (might not be after install completes)
     if not vim.api.nvim_buf_is_valid(buf) then return end
@@ -1018,7 +1122,7 @@ do
   -- require 'kickstart.plugins.indent_line'
   -- require 'kickstart.plugins.lint'
   -- require 'kickstart.plugins.autopairs'
-  -- require 'kickstart.plugins.neo-tree'
+  require 'kickstart.plugins.neo-tree'
 
   -- NOTE: You can add your own plugins, configuration, etc. in `lua/custom/plugins/*.lua`.
   --
